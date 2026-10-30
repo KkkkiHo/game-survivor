@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<title>倖存者</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { width: 100%; height: 100%; overflow: hidden; background: #0f172a; overscroll-behavior: none; }
+  body { font-family: -apple-system, "PingFang HK", "Microsoft JhengHei", sans-serif; color: #fff; position: fixed; }
+  #game { position: fixed; inset: 0; touch-action: none; display: block; }
+  #hud { position: fixed; top: 0; left: 0; right: 0; padding: 10px 12px; padding-top: max(10px, env(safe-area-inset-top)); display: none; z-index: 5; }
+  #hud.on { display: block; }
+  .bar { height: 10px; border-radius: 5px; background: rgba(255,255,255,0.15); overflow: hidden; margin-bottom: 5px; }
+  .bar > div { height: 100%; border-radius: 5px; }
+  #hpFill { background: #ef4444; width: 100%; }
+  #xpFill { background: #22d3ee; width: 0%; }
+  #bossWrap { display: none; margin-top: 6px; }
+  #bossWrap.on { display: block; }
+  #bossFill { background: #a855f7; width: 100%; }
+  .row { display: flex; justify-content: space-between; align-items: center; font-size: 15px; font-weight: bold; }
+  #pauseBtn { background: rgba(255,255,255,0.2); border: none; color: #fff; font-size: 16px; padding: 6px 12px; border-radius: 8px; }
+  .overlay { position: fixed; inset: 0; display: none; flex-direction: column; align-items: center; justify-content: center; background: rgba(2,6,23,0.82); z-index: 10; padding: 24px; text-align: center; }
+  .overlay.on { display: flex; }
+  h1 { font-size: 44px; margin-bottom: 12px; }
+  p { font-size: 16px; line-height: 1.7; color: #cbd5e1; }
+  .big { font-size: 20px; color: #fff; font-weight: bold; margin: 12px 0; }
+  button.main { margin-top: 20px; background: #f59e0b; border: none; color: #111; font-size: 20px; font-weight: bold; padding: 14px 44px; border-radius: 14px; }
+  button.main:active { opacity: 0.8; }
+  .choice { width: 100%; max-width: 340px; background: #1e293b; border: 2px solid #f59e0b; color: #fff; font-size: 17px; padding: 14px; border-radius: 12px; margin-top: 12px; text-align: left; }
+  .choice b { color: #fbbf24; }
+  .choice small { color: #94a3b8; display: block; margin-top: 4px; font-size: 14px; }
+  #banner { position: fixed; top: 22%; left: 0; right: 0; text-align: center; font-size: 30px; font-weight: bold; color: #fbbf24; text-shadow: 0 2px 8px #000; display: none; z-index: 6; pointer-events: none; }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">
+  <div class="bar"><div id="hpFill"></div></div>
+  <div class="bar"><div id="xpFill"></div></div>
+  <div class="row"><span id="statLine">第 1 級</span><span id="timeLine">00:00</span><button id="pauseBtn">暫停</button></div>
+  <div id="bossWrap"><div class="bar"><div id="bossFill"></div></div></div>
+</div>
+<div id="banner"></div>
+<div id="startScreen" class="overlay on">
+  <h1>倖存者</h1>
+  <p>拖動屏幕移動，武器會自動攻擊。<br>拾取寶石升級，生存越耐敵人越多越強。<br>每 150 秒會出現 Boss，擊敗佢有大量獎勵。</p>
+  <p class="big" id="bestLine"></p>
+  <button class="main" id="startBtn">開始遊戲</button>
+</div>
+<div id="levelupScreen" class="overlay">
+  <h1 style="font-size:30px;">升級！揀一個強化</h1>
+  <div id="choices" style="width:100%;display:flex;flex-direction:column;align-items:center;"></div>
+</div>
+<div id="pauseScreen" class="overlay">
+  <h1 style="font-size:30px;">暫停中</h1>
+  <button class="main" id="resumeBtn">繼續</button>
+</div>
+<div id="overScreen" class="overlay">
+  <h1 style="font-size:30px;">遊戲結束</h1>
+  <p class="big" id="overStats"></p>
+  <p id="overBest"></p>
+  <button class="main" id="restartBtn">再玩一次</button>
+</div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+let W = 0, H = 0;
+function resize() {
+  const DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = window.innerWidth; H = window.innerHeight;
+  canvas.width = W * DPR; canvas.height = H * DPR;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+window.addEventListener('resize', resize);
+resize();
+
+const $ = id => document.getElementById(id);
+const S = {
+  running: false, paused: false, over: false, levelup: false,
+  time: 0, kills: 0, level: 1, xp: 0, xpNeed: 10,
+  enemies: [], shots: [], gems: [], heals: [], texts: [],
+  spawnT: 0.5, eliteT: 40, bossT: 150, boss: null,
+  invuln: 0, atkT: 0, upCounts: {},
+  joy: { active: false, id: null, ox: 0, oy: 0, dx: 0, dy: 0 },
+  keys: {}, player: null, bannerT: 0
+};
+function xpNeedFor(level) { return 10 + (level - 1) * 7; }
+function rand(a, b) { return a + Math.random() * (b - a); }
+function enemyStatsFor(time, kind) {
+  const base = { normal: { hp: 20, speed: 55, r: 13, dmg: 10, color: '#ef4444' },
+    fast: { hp: 12, speed: 95, r: 10, dmg: 8, color: '#f97316' },
+    tank: { hp: 60, speed: 35, r: 20, dmg: 18, color: '#a855f7' } }[kind];
+  return { hp: base.hp * (1 + time / 75), speed: base.speed * (1 + Math.min(0.4, time / 600)),
+    r: base.r, dmg: base.dmg, color: base.color };
+}
+const UPGRADES = [
+  { id: 'dmg', name: '攻擊力提升', desc: '傷害 +30%', max: 5, apply: p => { p.dmg *= 1.3; } },
+  { id: 'rate', name: '攻擊加快', desc: '攻擊間隔 -18%', max: 5, apply: p => { p.rate *= 0.82; } },
+  { id: 'speed', name: '移動加快', desc: '移速 +15%', max: 4, apply: p => { p.speed *= 1.15; } },
+  { id: 'hp', name: '生命上限提升', desc: '上限 +25，回復 25', max: 5, apply: p => { p.maxHp += 25; p.hp = Math.min(p.maxHp, p.hp + 25); } },
+  { id: 'multi', name: '多重投射', desc: '投射物 +1', max: 3, apply: p => { p.mult += 1; } },
+  { id: 'magnet', name: '拾取範圍擴大', desc: '拾取範圍 +50%', max: 4, apply: p => { p.magnet *= 1.5; } },
+  { id: 'bullet', name: '彈速提升', desc: '子彈速度 +25%', max: 3, apply: p => { p.bspeed *= 1.25; } },
+  { id: 'crit', name: '暴擊率提升', desc: '暴擊率 +12%（暴擊造成雙倍傷害）', max: 4, apply: p => { p.crit += 0.12; } }
+];
+function newGame() {
+  S.running = true; S.paused = false; S.over = false; S.levelup = false;
+  S.time = 0; S.kills = 0; S.level = 1; S.xp = 0; S.xpNeed = xpNeedFor(1);
+  S.enemies = []; S.shots = []; S.gems = []; S.heals = []; S.texts = [];
+  S.spawnT = 0.5; S.eliteT = 40; S.bossT = 150; S.boss = null;
+  S.invuln = 0; S.atkT = 0; S.upCounts = {};
+  S.player = { x: W / 2, y: H / 2, r: 14, hp: 100, maxHp: 100, speed: 170,
+    dmg: 20, rate: 0.6, mult: 1, magnet: 90, bspeed: 420, crit: 0 };
+}
+function spawnEnemy(kind, elite) {
+  const m = 30, side = Math.floor(Math.random() * 4);
+  let x, y;
+  if (side === 0) { x = rand(0, W); y = -m; } else if (side === 1) { x = W + m; y = rand(0, H); }
+  else if (side === 2) { x = rand(0, W); y = H + m; } else { x = -m; y = rand(0, H); }
+  const st = enemyStatsFor(S.time, kind);
+  const e = { x, y, kind, hp: st.hp, maxHp: st.hp, speed: st.speed, r: st.r,
+    dmg: st.dmg, color: st.color, elite: !!elite, boss: false };
+  if (elite) { e.hp *= 2.2; e.maxHp = e.hp; e.r *= 1.5; }
+  S.enemies.push(e);
+  return e;
+}
+function spawnBoss() {
+  const e = spawnEnemy('tank', false);
+  e.boss = true; e.r = 46; e.hp = 900 * (1 + S.time / 300); e.maxHp = e.hp;
+  e.speed = 40; e.dmg = 25; e.color = '#991b1b';
+  S.boss = e;
+  showBanner('Boss 出現！');
+}
+function showBanner(text) {
+  S.texts.push({ text, t: 2 });
+  const b = $('banner');
+  if (b) { b.textContent = text; b.style.display = 'block'; }
+  S.bannerT = 2;
+}
+function pickKind() {
+  const r = Math.random();
+  if (S.time > 60 && r < 0.2) return 'tank';
+  if (S.time > 30 && r < 0.5) return 'fast';
+  return 'normal';
+}
+function openLevelUp() {
+  S.levelup = true; S.paused = true;
+  const avail = UPGRADES.filter(u => (S.upCounts[u.id] || 0) < u.max);
+  const picks = [];
+  const pool = avail.slice();
+  while (picks.length < 3 && pool.length) picks.push(pool.splice(Math.floor(Math.random() * pool.length), 1)[0]);
+  const box = $('choices');
+  box.innerHTML = '';
+  if (!picks.length) {
+    const b = document.createElement('button');
+    b.className = 'choice'; b.innerHTML = '<b>回復生命</b><small>回復 50 點生命</small>';
+    b.addEventListener('click', () => { S.player.hp = Math.min(S.player.maxHp, S.player.hp + 50); closeLevelUp(); });
+    box.appendChild(b);
+  } else {
+    picks.forEach(u => {
+      const b = document.createElement('button');
+      b.className = 'choice';
+      b.innerHTML = '<b>' + u.name + '</b><small>' + u.desc + '</small>';
+      b.addEventListener('click', () => { applyUpgrade(u); closeLevelUp(); });
+      box.appendChild(b);
+    });
+  }
+  $('levelupScreen').classList.add('on');
+}
+function applyUpgrade(u) {
+  u.apply(S.player);
+  S.upCounts[u.id] = (S.upCounts[u.id] || 0) + 1;
+}
+function closeLevelUp() {
+  S.levelup = false; S.paused = false;
+  $('levelupScreen').classList.remove('on');
+}
+function update(dt) {
+  if (!S.running || S.paused || S.over) return;
+  const p = S.player;
+  S.time += dt;
+  S.invuln = Math.max(0, S.invuln - dt);
+  S.atkT -= dt;
+  if (S.bannerT > 0) { S.bannerT -= dt; if (S.bannerT <= 0) $('banner').style.display = 'none'; }
+  let mx = 0, my = 0;
+  if (S.joy.active) { mx = S.joy.dx; my = S.joy.dy; }
+  if (S.keys['arrowleft'] || S.keys['a']) mx -= 1;
+  if (S.keys['arrowright'] || S.keys['d']) mx += 1;
+  if (S.keys['arrowup'] || S.keys['w']) my -= 1;
+  if (S.keys['arrowdown'] || S.keys['s']) my += 1;
+  const ml = Math.hypot(mx, my);
+  if (ml > 0) { p.x += (mx / ml) * p.speed * dt; p.y += (my / ml) * p.speed * dt; }
+  p.x = Math.max(p.r, Math.min(W - p.r, p.x));
+  p.y = Math.max(p.r, Math.min(H - p.r, p.y));
+  S.spawnT -= dt;
+  if (S.spawnT <= 0 && S.enemies.length < 160) {
+    spawnEnemy(pickKind(), false);
+    S.spawnT = Math.max(0.28, 0.9 - S.time * 0.004);
+  }
+  S.eliteT -= dt;
+  if (S.eliteT <= 0) { spawnEnemy(Math.random() < 0.5 ? 'normal' : 'tank', true); S.eliteT = 40; }
+  S.bossT -= dt;
+  if (S.bossT <= 0) { spawnBoss(); S.bossT = 150; }
+  if (S.atkT <= 0 && S.enemies.length) {
+    let target = null, td = Infinity;
+    for (const e of S.enemies) {
+      const d = Math.hypot(e.x - p.x, e.y - p.y);
+      if (d < td) { td = d; target = e; }
+    }
+    if (target) {
+      const base = Math.atan2(target.y - p.y, target.x - p.x);
+      for (let i = 0; i < p.mult; i++) {
+        const off = (i - (p.mult - 1) / 2) * 0.14;
+        const a = base + off;
+        const crit = Math.random() < p.crit;
+        S.shots.push({ x: p.x, y: p.y, vx: Math.cos(a) * p.bspeed, vy: Math.sin(a) * p.bspeed,
+          dmg: p.dmg * (crit ? 2 : 1), r: 5, crit });
+      }
+      S.atkT = p.rate;
+    }
+  }
+  for (let i = S.shots.length - 1; i >= 0; i--) {
+    const s = S.shots[i];
+    s.x += s.vx * dt; s.y += s.vy * dt;
+    if (s.x < -20 || s.x > W + 20 || s.y < -20 || s.y > H + 20) { S.shots.splice(i, 1); continue; }
+    for (let j = S.enemies.length - 1; j >= 0; j--) {
+      const e = S.enemies[j];
+      if (Math.hypot(e.x - s.x, e.y - s.y) < e.r + s.r) {
+        e.hp -= s.dmg;
+        S.shots.splice(i, 1);
+        if (e.hp <= 0) {
+          S.kills++;
+          const n = e.boss ? 25 : e.elite ? 5 : e.kind === 'tank' ? 3 : 1;
+          for (let k = 0; k < n; k++) S.gems.push({ x: e.x + rand(-14, 14), y: e.y + rand(-14, 14), v: 1 });
+          if (e.elite && Math.random() < 0.5) S.heals.push({ x: e.x, y: e.y });
+          if (e.boss) {
+            S.boss = null;
+            for (let k = 0; k < 10; k++) S.gems.push({ x: e.x + rand(-30, 30), y: e.y + rand(-30, 30), v: 1 });
+            S.heals.push({ x: e.x, y: e.y });
+            showBanner('Boss 擊敗！');
+          }
+          S.enemies.splice(j, 1);
+        }
+        break;
+      }
+    }
+  }
+  for (const e of S.enemies) {
+    const d = Math.hypot(p.x - e.x, p.y - e.y) || 1;
+    e.x += ((p.x - e.x) / d) * e.speed * dt;
+    e.y += ((p.y - e.y) / d) * e.speed * dt;
+    if (d < p.r + e.r && S.invuln <= 0) {
+      p.hp -= e.dmg;
+      S.invuln = 0.5;
+      p.x += ((p.x - e.x) / d) * 18; p.y += ((p.y - e.y) / d) * 18;
+      if (p.hp <= 0) { gameOver(); return; }
+    }
+  }
+  for (let i = S.gems.length - 1; i >= 0; i--) {
+    const g = S.gems[i];
+    const d = Math.hypot(p.x - g.x, p.y - g.y);
+    if (d < p.magnet) { g.x += ((p.x - g.x) / (d || 1)) * 260 * dt; g.y += ((p.y - g.y) / (d || 1)) * 260 * dt; }
+    if (d < p.r + 12) {
+      S.gems.splice(i, 1);
+      S.xp += g.v;
+      if (S.xp >= S.xpNeed && !S.levelup) {
+        S.xp -= S.xpNeed;
+        S.level++;
+        S.xpNeed = xpNeedFor(S.level);
+        openLevelUp();
+      }
+    }
+  }
+  for (let i = S.heals.length - 1; i >= 0; i--) {
+    const h = S.heals[i];
+    const d = Math.hypot(p.x - h.x, p.y - h.y);
+    if (d < p.magnet) { h.x += ((p.x - h.x) / (d || 1)) * 260 * dt; h.y += ((p.y - h.y) / (d || 1)) * 260 * dt; }
+    if (d < p.r + 12) { S.heals.splice(i, 1); p.hp = Math.min(p.maxHp, p.hp + 20); }
+  }
+}
+function drawHUD() {
+  const p = S.player;
+  if (!p) return;
+  $('hpFill').style.width = Math.max(0, (p.hp / p.maxHp) * 100) + '%';
+  $('xpFill').style.width = Math.min(100, (S.xp / S.xpNeed) * 100) + '%';
+  $('statLine').textContent = '第 ' + S.level + ' 級　擊殺 ' + S.kills;
+  const m = Math.floor(S.time / 60), s = Math.floor(S.time % 60);
+  $('timeLine').textContent = (m < 10 ? '0' : '') + m + ':' + (s < 10 ? '0' : '') + s;
+  const bw = $('bossWrap');
+  if (S.boss) { bw.classList.add('on'); $('bossFill').style.width = Math.max(0, (S.boss.hp / S.boss.maxHp) * 100) + '%'; }
+  else bw.classList.remove('on');
+}
+function render() {
+  ctx.fillStyle = '#0f172a';
+  ctx.fillRect(0, 0, W, H);
+  ctx.fillStyle = 'rgba(255,255,255,0.05)';
+  for (let x = 24; x < W; x += 48) for (let y = 24; y < H; y += 48) { ctx.fillRect(x, y, 2, 2); }
+  for (const g of S.gems) {
+    ctx.save(); ctx.translate(g.x, g.y); ctx.rotate(Math.PI / 4);
+    ctx.fillStyle = '#22d3ee'; ctx.fillRect(-5, -5, 10, 10); ctx.restore();
+  }
+  for (const h of S.heals) {
+    ctx.fillStyle = '#22c55e'; ctx.beginPath(); ctx.arc(h.x, h.y, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.fillRect(h.x - 2, h.y - 7, 4, 14); ctx.fillRect(h.x - 7, h.y - 2, 14, 4);
+  }
+  for (const e of S.enemies) {
+    ctx.fillStyle = e.color; ctx.beginPath(); ctx.arc(e.x, e.y, e.r, 0, Math.PI * 2); ctx.fill();
+    if (e.elite || e.boss) { ctx.strokeStyle = '#fbbf24'; ctx.lineWidth = 3; ctx.stroke(); }
+    ctx.fillStyle = '#fff'; ctx.beginPath(); ctx.arc(e.x - e.r * 0.35, e.y - e.r * 0.2, 2.5, 0, Math.PI * 2); ctx.arc(e.x + e.r * 0.35, e.y - e.r * 0.2, 2.5, 0, Math.PI * 2); ctx.fill();
+  }
+  for (const s of S.shots) {
+    ctx.fillStyle = s.crit ? '#f97316' : '#fbbf24';
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.crit ? 7 : s.r, 0, Math.PI * 2); ctx.fill();
+  }
+  const p = S.player;
+  if (p) {
+    ctx.fillStyle = '#fbbf24'; ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#111827'; ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, Math.PI * 2); ctx.fill();
+  }
+  if (S.joy.active) {
+    ctx.strokeStyle = 'rgba(255,255,255,0.4)'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(S.joy.ox, S.joy.oy, 50, 0, Math.PI * 2); ctx.stroke();
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.beginPath(); ctx.arc(S.joy.ox + S.joy.dx * 50, S.joy.oy + S.joy.dy * 50, 22, 0, Math.PI * 2); ctx.fill();
+  }
+}
+let lastT = 0;
+function frame(t) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.05, (t - lastT) / 1000 || 0.016);
+  lastT = t;
+  if (S.running && !S.paused && !S.over) update(dt);
+  render();
+  if (S.running) drawHUD();
+}
+function fmtTime(t) {
+  const m = Math.floor(t / 60), s = Math.floor(t % 60);
+  return m + ' 分 ' + s + ' 秒';
+}
+function gameOver() {
+  S.over = true;
+  let best = null;
+  try { best = JSON.parse(localStorage.getItem('survivor-best-v1') || 'null'); } catch (e) { best = null; }
+  let isBest = false;
+  if (!best || S.time > best.time) {
+    best = { time: Math.floor(S.time), kills: S.kills };
+    try { localStorage.setItem('survivor-best-v1', JSON.stringify(best)); } catch (e) {}
+    isBest = true;
+  }
+  $('overStats').textContent = '生存 ' + fmtTime(S.time) + '　擊殺 ' + S.kills + '　等級 ' + S.level;
+  $('overBest').textContent = isBest ? '新紀錄！' : '最佳紀錄：生存 ' + fmtTime(best.time) + '　擊殺 ' + best.kills;
+  $('overScreen').classList.add('on');
+}
+function startGame() {
+  newGame();
+  $('startScreen').classList.remove('on');
+  $('overScreen').classList.remove('on');
+  $('pauseScreen').classList.remove('on');
+  $('levelupScreen').classList.remove('on');
+  $('hud').classList.add('on');
+  lastT = performance.now();
+}
+function bestLine() {
+  try {
+    const best = JSON.parse(localStorage.getItem('survivor-best-v1') || 'null');
+    $('bestLine').textContent = best ? '最佳紀錄：生存 ' + fmtTime(best.time) + '　擊殺 ' + best.kills : '';
+  } catch (e) {}
+}
+function joyStart(id, x, y) {
+  S.joy.active = true; S.joy.id = id; S.joy.ox = x; S.joy.oy = y; S.joy.dx = 0; S.joy.dy = 0;
+}
+function joyMove(id, x, y) {
+  if (!S.joy.active || S.joy.id !== id) return;
+  let dx = (x - S.joy.ox) / 50, dy = (y - S.joy.oy) / 50;
+  const l = Math.hypot(dx, dy);
+  if (l > 1) { dx /= l; dy /= l; }
+  S.joy.dx = dx; S.joy.dy = dy;
+}
+function joyEnd(id) {
+  if (S.joy.id !== id) return;
+  S.joy.active = false; S.joy.dx = 0; S.joy.dy = 0;
+}
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.changedTouches[0];
+  joyStart(t.identifier, t.clientX, t.clientY);
+}, { passive: false });
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) joyMove(t.identifier, t.clientX, t.clientY);
+}, { passive: false });
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  for (const t of e.changedTouches) joyEnd(t.identifier);
+}, { passive: false });
+canvas.addEventListener('touchcancel', e => {
+  for (const t of e.changedTouches) joyEnd(t.identifier);
+});
+canvas.addEventListener('mousedown', e => joyStart('mouse', e.clientX, e.clientY));
+window.addEventListener('mousemove', e => joyMove('mouse', e.clientX, e.clientY));
+window.addEventListener('mouseup', () => joyEnd('mouse'));
+document.addEventListener('keydown', e => { S.keys[e.key.toLowerCase()] = true; });
+document.addEventListener('keyup', e => { S.keys[e.key.toLowerCase()] = false; });
+document.addEventListener('visibilitychange', () => {
+  if (document.hidden && S.running && !S.over && !S.levelup) {
+    S.paused = true;
+    $('pauseScreen').classList.add('on');
+  }
+});
+$('startBtn').addEventListener('click', startGame);
+$('restartBtn').addEventListener('click', startGame);
+$('pauseBtn').addEventListener('click', () => {
+  if (!S.running || S.over || S.levelup) return;
+  S.paused = true;
+  $('pauseScreen').classList.add('on');
+});
+$('resumeBtn').addEventListener('click', () => {
+  S.paused = false;
+  $('pauseScreen').classList.remove('on');
+});
+bestLine();
+requestAnimationFrame(frame);
+window.__survivor = { S, newGame, update, applyUpgrade, openLevelUp, closeLevelUp, xpNeedFor, enemyStatsFor, UPGRADES, spawnEnemy, spawnBoss };
+</script>
+</body>
+</html>
